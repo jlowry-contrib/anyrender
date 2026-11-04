@@ -7,8 +7,8 @@ use debug_timer::debug_timer;
 use peniko::Color;
 use raw_window_handle::RawWindowHandle;
 use vello_gpu::{
-    RenderSize, Resources, Scene, WebGlRenderer, WebGlRendererInit, WebGlRendererInitStatus,
-    WebGlTextureBindings,
+    RenderSize, Resources, Scene, WebGlRenderOptions, WebGlRenderTarget, WebGlRenderer,
+    WebGlRendererInit, WebGlRendererInitStatus, WebGlTextureBindings,
 };
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::HtmlCanvasElement;
@@ -66,7 +66,7 @@ impl VelloHybridWebGlWindowRenderer {
         let config = config.into();
         Self {
             render_state: RenderState::Suspended,
-            scene: Scene::new_with(0, 0, config.render_settings.level),
+            scene: Scene::new_with(0, 0, config.render_settings.level()),
             config,
             cached_images: ImageCache::default(),
             texture_bindings: WebGlTextureBindings::new(),
@@ -143,9 +143,15 @@ impl WindowRenderer for VelloHybridWebGlWindowRenderer {
         set_canvas_size(&canvas, width, height);
         self.scene.reset_and_resize(width as u16, height as u16);
 
-        let (init, resources) =
-            WebGlRenderer::begin_with(&canvas, self.config.render_settings, true)
-                .expect("Error creating WebGL renderer");
+        let (init, resources) = WebGlRenderer::begin_with(
+            &canvas,
+            self.config
+                .render_settings
+                .clone()
+                .with_memory_settings(self.config.memory_settings),
+            true,
+        )
+        .expect("Error creating WebGL renderer");
 
         self.render_state = RenderState::Pending {
             init,
@@ -247,9 +253,9 @@ impl WindowRenderer for VelloHybridWebGlWindowRenderer {
             .render(
                 &self.scene,
                 &mut state.resources,
-                &render_size,
+                WebGlRenderTarget::DrawingBuffer,
                 &self.texture_bindings,
-                Color::TRANSPARENT,
+                WebGlRenderOptions::default(),
             )
             .expect("failed to render to canvas");
         WebGlImageManager::new(
