@@ -17,7 +17,8 @@ use crate::PaintScene;
 
 /// Alpha of the white that [`fill_tint`] uses for a shape without a tint.
 ///
-/// A light veil keeps an untinted glass shape visible over any backdrop without hiding it.
+/// The tint fallback's own choice, not a measured material value: a light veil that keeps an
+/// untinted glass shape visible over any backdrop without hiding it.
 const FALLBACK_TINT_ALPHA: f32 = 0.3;
 
 /// A set of glass shapes that share one backdrop and can merge into each other.
@@ -27,7 +28,8 @@ const FALLBACK_TINT_ALPHA: f32 = 0.3;
 pub struct GlassGroup {
     /// The shapes, drawn in order.
     pub shapes: Vec<GlassShape>,
-    /// The distance, in user units, within which neighbouring shapes merge.
+    /// The distance, in scene units after each shape's transform, within which neighboring
+    /// shapes merge.
     pub merge_spacing: f64,
     /// Pairs of shape ids that merge whatever the distance between them.
     pub unions: Vec<(u32, u32)>,
@@ -133,7 +135,7 @@ pub enum CornerStyle {
 pub struct GlassMaterial {
     /// The kind of glass.
     pub variant: GlassVariant,
-    /// A colour laid over the backdrop, if any.
+    /// A color laid over the backdrop, if any.
     pub tint: Option<Color>,
     /// Whether the shape reacts to touches.
     pub interactive: bool,
@@ -158,7 +160,7 @@ pub enum GlassVariant {
     Regular,
     /// Clearer glass, for controls over media.
     Clear,
-    /// Glass that leaves its backdrop unchanged.
+    /// Glass that draws nothing, kept in the group so it can morph into the other variants.
     Identity,
 }
 
@@ -180,10 +182,15 @@ pub enum BackdropSource {
 
 /// Fills each shape of `group` with its tint, under the shape's transform.
 ///
-/// A shape without a tint gets a translucent white. The group's alpha scales every fill.
-/// This is the default [`PaintScene::draw_glass`], for backends that can't render glass.
+/// A shape without a tint gets a translucent white, and a [`GlassVariant::Identity`] shape
+/// draws nothing. The group's alpha scales every fill. Continuous and superellipse corners are
+/// drawn circular. This is the default [`PaintScene::draw_glass`], for backends that can't
+/// render glass.
 pub fn fill_tint(painter: &mut (impl PaintScene + ?Sized), group: &GlassGroup) {
     for shape in &group.shapes {
+        if shape.material.variant == GlassVariant::Identity {
+            continue;
+        }
         let color = shape
             .material
             .tint

@@ -220,3 +220,51 @@ fn append_scene_composes_the_backdrop_region_transform() {
         }
     );
 }
+
+#[test]
+fn default_draw_glass_skips_identity_shapes() {
+    let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+    let group = GlassGroup::new(vec![
+        GlassShape::new(
+            1,
+            Affine::translate((1.0, 0.0)),
+            ShapeKind::Capsule(rect),
+            tinted(GlassVariant::Identity, RED),
+        ),
+        GlassShape::new(
+            2,
+            Affine::translate((2.0, 0.0)),
+            ShapeKind::Capsule(rect),
+            tinted(GlassVariant::Regular, BLUE),
+        ),
+        GlassShape::new(
+            3,
+            Affine::translate((3.0, 0.0)),
+            ShapeKind::Ellipse(rect),
+            GlassMaterial::new(GlassVariant::Identity),
+        ),
+    ]);
+    let mut painter = FillLog::default();
+    painter.draw_glass(&group);
+
+    assert_eq!(painter.fills, vec![(Affine::translate((2.0, 0.0)), BLUE)]);
+}
+
+#[test]
+fn default_draw_glass_scales_fills_by_the_group_alpha() {
+    let mut group = two_shapes();
+    group.alpha = 0.5;
+    let mut painter = FillLog::default();
+    painter.draw_glass(&group);
+
+    assert_eq!(
+        painter.fills,
+        vec![
+            (
+                Affine::translate((5.0, 6.0)),
+                Color::from_rgba8(255, 0, 0, 64)
+            ),
+            (Affine::scale(2.0), Color::from_rgba8(0, 0, 255, 32)),
+        ]
+    );
+}

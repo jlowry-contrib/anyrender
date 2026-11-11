@@ -271,7 +271,7 @@ pub trait PaintScene: RenderContext {
     /// Draws a group of glass shapes over the content drawn so far.
     ///
     /// The default fills each shape with its tint (see [`glass::fill_tint`]), for backends
-    /// that can't render glass.
+    /// that can't render glass; identity shapes draw nothing.
     fn draw_glass(&mut self, group: &GlassGroup) {
         glass::fill_tint(self, group);
     }
