@@ -134,21 +134,18 @@ impl ImageRenderer for VelloImageRenderer {
             antialiasing_method: vello::AaConfig::Area,
         };
         let has_markers = !self.scene.encoding().glass.is_empty();
-        match self.glass.begin_frame(has_markers) {
-            Some(passes) => self.vello_renderer.render_to_texture_with_glass(
-                device,
-                queue,
-                &self.scene,
-                &view,
-                &params,
-                passes,
-            ),
-            None => {
-                self.vello_renderer
-                    .render_to_texture(device, queue, &self.scene, &view, &params)
-            }
-        }
-        .expect("Got non-Send/Sync error from rendering");
+        let scene = &self.scene;
+        self.glass
+            .render(
+                has_markers,
+                &mut self.vello_renderer,
+                |renderer, passes| {
+                    renderer
+                        .render_to_texture_with_glass(device, queue, scene, &view, &params, passes)
+                },
+                |renderer| renderer.render_to_texture(device, queue, scene, &view, &params),
+            )
+            .expect("Got non-Send/Sync error from rendering");
         self.glass.reset_frame();
 
         self.buffer_renderer.copy_texture_to_buffer(cpu_buffer);

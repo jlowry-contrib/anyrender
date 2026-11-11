@@ -494,22 +494,24 @@ impl WindowRenderer for VelloWindowRenderer {
         };
         let (device, queue) = (render_surface.device(), render_surface.queue());
         let has_markers = !self.scene.encoding().glass.is_empty();
-        match self.glass.begin_frame(has_markers) {
-            Some(passes) => state.renderer.render_to_texture_with_glass(
-                device,
-                queue,
-                &self.scene,
-                &texture_view,
-                &params,
-                passes,
-            ),
-            None => {
-                state
-                    .renderer
-                    .render_to_texture(device, queue, &self.scene, &texture_view, &params)
-            }
-        }
-        .expect("failed to render to texture");
+        let scene = &self.scene;
+        self.glass
+            .render(
+                has_markers,
+                &mut state.renderer,
+                |renderer, passes| {
+                    renderer.render_to_texture_with_glass(
+                        device,
+                        queue,
+                        scene,
+                        &texture_view,
+                        &params,
+                        passes,
+                    )
+                },
+                |renderer| renderer.render_to_texture(device, queue, scene, &texture_view, &params),
+            )
+            .expect("failed to render to texture");
         self.glass.reset_frame();
         timer.record_time("render");
 

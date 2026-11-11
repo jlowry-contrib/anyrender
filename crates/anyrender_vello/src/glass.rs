@@ -69,6 +69,8 @@ pub(crate) struct GlassSlot {
     pub(crate) composite_outside_logged: bool,
     /// Whether this frame already logged regions it couldn't mark.
     pub(crate) invalid_logged: bool,
+    /// Whether the last glass render failed, so a run of failures logs once.
+    pub(crate) render_failed: bool,
 }
 
 impl GlassSlot {
@@ -91,6 +93,40 @@ impl GlassSlot {
         let backend = self.backend.as_deref_mut().filter(|_| has_markers)?;
         backend.begin_frame(&self.frame_groups, &inputs);
         Some(backend)
+    }
+
+    /// Renders a frame into `renderer` with `glass` when [`begin_frame`](Self::begin_frame)
+    /// returns the backend, and with `stock` otherwise or when `glass` fails.
+    ///
+    /// A glass failure is logged as `glass.render.failed` when it follows a frame that
+    /// didn't fail, and the frame renders without glass rather than panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of `stock`.
+    pub(crate) fn render<R: ?Sized>(
+        &mut self,
+        has_markers: bool,
+        renderer: &mut R,
+        glass: impl FnOnce(&mut R, &mut dyn GlassPasses) -> Result<(), vello::Error>,
+        stock: impl FnOnce(&mut R) -> Result<(), vello::Error>,
+    ) -> Result<(), vello::Error> {
+        let Some(passes) = self.begin_frame(has_markers) else {
+            return stock(renderer);
+        };
+        match glass(renderer, passes) {
+            Ok(()) => {
+                self.render_failed = false;
+                Ok(())
+            }
+            Err(error) => {
+                if !self.render_failed {
+                    log::warn!("glass.render.failed error={error}");
+                }
+                self.render_failed = true;
+                stock(renderer)
+            }
+        }
     }
 }
 
@@ -235,5 +271,98 @@ mod tests {
     fn a_region_past_the_i32_range_saturates_to_empty() {
         // Both x edges saturate to i32::MAX, leaving no pixels.
         assert_eq!(marker(0, region(1e12, 0.0, 2e12, 40.0)), None);
+    }
+
+    /// A backend that renders nothing; the test's glass closure stands in for Vello.
+    struct Inert;
+
+    impl GlassPasses for Inert {
+        fn prepare(&mut self, _: &wgpu::Device, _: &wgpu::Queue, _: &vello::glass::GlassFrame<'_>) {
+        }
+
+        fn record(
+            &mut self,
+            _: &wgpu::Device,
+            _: &mut wgpu::CommandEncoder,
+            _: &vello::glass::GlassPhase<'_>,
+        ) {
+        }
+    }
+
+    impl GlassBackend for Inert {
+        fn regions(&self, _: &GlassGroup, _: f64) -> GlassRegions {
+            grown(Rect::ZERO)
+        }
+
+        fn begin_frame(&mut self, _: &[Arc<GlassGroup>], _: &FrameInputs) {}
+    }
+
+    /// Captures warnings, for the only test in this binary that logs.
+    fn warnings() -> &'static std::sync::Mutex<Vec<String>> {
+        use std::sync::{Mutex, OnceLock};
+        static LOGGED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+        static LOGGER: Capture = Capture;
+        struct Capture;
+        impl log::Log for Capture {
+            fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+                metadata.level() <= log::Level::Warn
+            }
+            fn log(&self, record: &log::Record<'_>) {
+                warnings().lock().unwrap().push(record.args().to_string());
+            }
+            fn flush(&self) {}
+        }
+        LOGGED.get_or_init(|| {
+            let _ = log::set_logger(&LOGGER);
+            log::set_max_level(log::LevelFilter::Warn);
+            Mutex::new(Vec::new())
+        })
+    }
+
+    #[test]
+    fn a_failed_glass_render_falls_back_to_stock_and_logs_once() {
+        let logged = warnings();
+        let mut slot = GlassSlot {
+            backend: Some(Box::new(Inert)),
+            ..GlassSlot::default()
+        };
+        let failing = |calls: &mut Vec<&str>, _: &mut dyn GlassPasses| {
+            calls.push("glass");
+            Err(vello::Error::GlassAtlasTooLarge(512, 16384, 8192))
+        };
+        let stock = |calls: &mut Vec<&str>| {
+            calls.push("stock");
+            Ok(())
+        };
+        let mut calls = Vec::new();
+        for _ in 0..2 {
+            assert!(slot.render(true, &mut calls, failing, stock).is_ok());
+        }
+        assert_eq!(calls, ["glass", "stock", "glass", "stock"]);
+        let failed: Vec<_> = logged
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.starts_with("glass.render.failed"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            failed,
+            [
+                "glass.render.failed error=Glass atlas of 512x16384 exceeds the device's 8192 px \
+              texture limit"
+            ]
+        );
+
+        // A frame that renders its glass ends the run, and a frame without markers is stock.
+        calls.clear();
+        let rendered = |c: &mut Vec<&str>, _: &mut dyn GlassPasses| {
+            c.push("glass");
+            Ok(())
+        };
+        slot.render(true, &mut calls, rendered, stock).unwrap();
+        slot.render(false, &mut calls, failing, stock).unwrap();
+        assert_eq!(calls, ["glass", "stock"]);
+        assert!(!slot.render_failed);
     }
 }
