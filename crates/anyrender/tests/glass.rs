@@ -14,6 +14,8 @@ use peniko::{BlendMode, Color, Fill, FontData, StyleRef};
 #[derive(Default)]
 struct FillLog {
     fills: Vec<(Affine, Color)>,
+    /// The address of each group `draw_shared_glass` received.
+    shared: Vec<*const GlassGroup>,
 }
 
 impl RenderContext for FillLog {}
@@ -87,6 +89,11 @@ impl PaintScene for FillLog {
         _radius: f64,
         _std_dev: f64,
     ) {
+    }
+
+    fn draw_shared_glass(&mut self, group: Arc<GlassGroup>) {
+        self.shared.push(Arc::as_ptr(&group));
+        self.draw_glass(&group);
     }
 }
 
@@ -267,4 +274,30 @@ fn default_draw_glass_scales_fills_by_the_group_alpha() {
             (Affine::scale(2.0), Color::from_rgba8(0, 0, 255, 32)),
         ]
     );
+}
+
+#[test]
+fn append_scene_passes_the_recorded_group_through() {
+    let mut fragment = Scene::new();
+    fragment.draw_glass(&two_shapes());
+    let RenderCommand::Glass(recorded) = &fragment.commands[0] else {
+        panic!("expected a glass command, got {:?}", fragment.commands);
+    };
+    let recorded = Arc::as_ptr(recorded);
+
+    let mut painter = FillLog::default();
+    painter.append_scene(fragment, Affine::translate((1.0, 2.0)));
+    assert_eq!(painter.shared, vec![recorded]);
+    assert_eq!(painter.fills.len(), 2);
+}
+
+#[test]
+fn recording_keeps_a_shared_group_without_cloning_it() {
+    let group = Arc::new(two_shapes());
+    let mut scene = Scene::new();
+    scene.draw_shared_glass(Arc::clone(&group));
+    let [RenderCommand::Glass(kept)] = scene.commands.as_slice() else {
+        panic!("expected one glass command, got {:?}", scene.commands);
+    };
+    assert!(Arc::ptr_eq(kept, &group));
 }

@@ -5,6 +5,7 @@ use vello::{Renderer as VelloRenderer, RendererOptions, Scene as VelloScene};
 use wgpu::TextureUsages;
 use wgpu_context::{BufferRenderer, BufferRendererConfig, WGPUContext};
 
+use crate::glass::{FrameInputs, GlassBackend, GlassSlot};
 use crate::{DEFAULT_THREADS, VelloScenePainter};
 
 pub struct VelloImageRenderer {
@@ -12,6 +13,7 @@ pub struct VelloImageRenderer {
     vello_renderer: VelloRenderer,
     scene: VelloScene,
     texture_handles: FxHashMap<ResourceId, ImageData>,
+    glass: GlassSlot,
 }
 
 impl VelloImageRenderer {
@@ -52,7 +54,24 @@ impl VelloImageRenderer {
             vello_renderer,
             scene: VelloScene::new(),
             texture_handles: FxHashMap::default(),
+            glass: GlassSlot::default(),
         }
+    }
+
+    /// Installs the backend that renders glass groups, replacing any earlier one.
+    pub fn set_glass_backend(&mut self, backend: Box<dyn GlassBackend + Send>) {
+        self.glass.backend = Some(backend);
+    }
+
+    /// Sets the inputs the glass backend renders the next frames with.
+    pub fn set_glass_frame_inputs(&mut self, inputs: FrameInputs) {
+        self.glass.inputs = Some(inputs);
+    }
+
+    /// Returns the Vello renderer, for tests.
+    #[doc(hidden)]
+    pub fn vello_renderer(&self) -> Option<&VelloRenderer> {
+        Some(&self.vello_renderer)
     }
 }
 
@@ -73,6 +92,7 @@ impl ImageRenderer for VelloImageRenderer {
 
     fn reset(&mut self) {
         self.scene.reset();
+        self.glass.reset_frame();
     }
 
     fn render_to_vec<F: FnOnce(&mut Self::ScenePainter<'_>)>(
@@ -90,11 +110,13 @@ impl ImageRenderer for VelloImageRenderer {
         draw_fn: F,
         cpu_buffer: &mut [u8],
     ) {
+        self.glass.reset_frame();
         draw_fn(&mut VelloScenePainter {
             inner: &mut self.scene,
             renderer: Some(&mut self.vello_renderer),
             device_handle: Some(&self.buffer_renderer.device_handle),
             texture_handles: Some(&mut self.texture_handles),
+            glass: Some(&mut self.glass),
         });
 
         for handle in self.texture_handles.values() {
@@ -102,20 +124,32 @@ impl ImageRenderer for VelloImageRenderer {
         }
 
         let size = self.buffer_renderer.size();
-        self.vello_renderer
-            .render_to_texture(
-                self.buffer_renderer.device(),
-                self.buffer_renderer.queue(),
+        let device = self.buffer_renderer.device();
+        let queue = self.buffer_renderer.queue();
+        let view = self.buffer_renderer.target_texture_view();
+        let params = vello::RenderParams {
+            base_color: vello::peniko::Color::TRANSPARENT,
+            width: size.width,
+            height: size.height,
+            antialiasing_method: vello::AaConfig::Area,
+        };
+        let has_markers = !self.scene.encoding().glass.is_empty();
+        match self.glass.begin_frame(has_markers) {
+            Some(passes) => self.vello_renderer.render_to_texture_with_glass(
+                device,
+                queue,
                 &self.scene,
-                &self.buffer_renderer.target_texture_view(),
-                &vello::RenderParams {
-                    base_color: vello::peniko::Color::TRANSPARENT,
-                    width: size.width,
-                    height: size.height,
-                    antialiasing_method: vello::AaConfig::Area,
-                },
-            )
-            .expect("Got non-Send/Sync error from rendering");
+                &view,
+                &params,
+                passes,
+            ),
+            None => {
+                self.vello_renderer
+                    .render_to_texture(device, queue, &self.scene, &view, &params)
+            }
+        }
+        .expect("Got non-Send/Sync error from rendering");
+        self.glass.reset_frame();
 
         self.buffer_renderer.copy_texture_to_buffer(cpu_buffer);
 

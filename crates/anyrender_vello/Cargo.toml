@@ -17,6 +17,7 @@ wgpu_context = { workspace = true }
 
 debug_timer = { workspace = true }
 kurbo = { workspace = true }
+log = { workspace = true }
 peniko = { workspace = true }
 vello = { workspace = true }
 wgpu = { workspace = true }

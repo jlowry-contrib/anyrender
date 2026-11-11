@@ -1,5 +1,6 @@
 //! A [`vello`] backend for the [`anyrender`] 2D drawing abstraction
 
+pub mod glass;
 #[cfg(not(target_arch = "wasm32"))]
 mod image_renderer;
 mod scene;

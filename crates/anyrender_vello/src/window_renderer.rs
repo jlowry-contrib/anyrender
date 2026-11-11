@@ -20,6 +20,7 @@ use wgpu_context::{
     TextureConfiguration, WGPUContext,
 };
 
+use crate::glass::{FrameInputs, GlassBackend, GlassSlot};
 use crate::{DEFAULT_THREADS, VelloScenePainter};
 
 /// Drive the wgpu init future. On wasm32 we spawn it onto the JS microtask
@@ -167,6 +168,7 @@ pub struct VelloWindowRenderer {
 
     // Resources
     texture_handles: FxHashMap<ResourceId, ImageData>,
+    glass: GlassSlot,
 }
 
 impl VelloWindowRenderer {
@@ -184,7 +186,18 @@ impl VelloWindowRenderer {
             window_handle: None,
             scene: VelloScene::new(),
             texture_handles: FxHashMap::default(),
+            glass: GlassSlot::default(),
         }
+    }
+
+    /// Installs the backend that renders glass groups, replacing any earlier one.
+    pub fn set_glass_backend(&mut self, backend: Box<dyn GlassBackend + Send>) {
+        self.glass.backend = Some(backend);
+    }
+
+    /// Sets the inputs the glass backend renders the next frames with.
+    pub fn set_glass_frame_inputs(&mut self, inputs: FrameInputs) {
+        self.glass.inputs = Some(inputs);
     }
 
     pub fn current_device_handle(&self) -> Option<&DeviceHandle> {
@@ -435,6 +448,13 @@ impl WindowRenderer for VelloWindowRenderer {
         };
     }
 
+    fn wants_redraw(&self) -> bool {
+        self.glass
+            .backend
+            .as_ref()
+            .is_some_and(|backend| backend.wants_redraw())
+    }
+
     fn render<F: FnOnce(&mut Self::ScenePainter<'_>)>(&mut self, draw_fn: F) {
         let RenderState::Active(state) = &mut self.render_state else {
             return;
@@ -445,11 +465,13 @@ impl WindowRenderer for VelloWindowRenderer {
         debug_timer!(timer, feature = "log_frame_times");
 
         // Regenerate the vello scene
+        self.glass.reset_frame();
         draw_fn(&mut VelloScenePainter {
             inner: &mut self.scene,
             renderer: Some(&mut state.renderer),
             device_handle: Some(&render_surface.device_handle),
             texture_handles: Some(&mut self.texture_handles),
+            glass: Some(&mut self.glass),
         });
         timer.record_time("cmd");
 
@@ -464,21 +486,31 @@ impl WindowRenderer for VelloWindowRenderer {
             state.renderer.mark_override_image_dirty(handle);
         }
 
-        state
-            .renderer
-            .render_to_texture(
-                render_surface.device(),
-                render_surface.queue(),
+        let params = RenderParams {
+            base_color: self.config.base_color,
+            width: render_surface.config.width,
+            height: render_surface.config.height,
+            antialiasing_method: self.config.antialiasing_method,
+        };
+        let (device, queue) = (render_surface.device(), render_surface.queue());
+        let has_markers = !self.scene.encoding().glass.is_empty();
+        match self.glass.begin_frame(has_markers) {
+            Some(passes) => state.renderer.render_to_texture_with_glass(
+                device,
+                queue,
                 &self.scene,
                 &texture_view,
-                &RenderParams {
-                    base_color: self.config.base_color,
-                    width: render_surface.config.width,
-                    height: render_surface.config.height,
-                    antialiasing_method: self.config.antialiasing_method,
-                },
-            )
-            .expect("failed to render to texture");
+                &params,
+                passes,
+            ),
+            None => {
+                state
+                    .renderer
+                    .render_to_texture(device, queue, &self.scene, &texture_view, &params)
+            }
+        }
+        .expect("failed to render to texture");
+        self.glass.reset_frame();
         timer.record_time("render");
 
         drop(texture_view);

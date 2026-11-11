@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyrender::glass::{GlassGroup, fill_tint};
 use anyrender::{Filter, NormalizedCoord, Paint, PaintRef, PaintScene, RenderContext, ResourceId};
 use kurbo::{Affine, Rect, Shape, Stroke};
 use peniko::{BlendMode, BrushRef, Color, Fill, FontData, ImageBrush, ImageData, StyleRef};
@@ -8,11 +9,14 @@ use vello::Renderer as VelloRenderer;
 use wgpu::Texture;
 use wgpu_context::DeviceHandle;
 
+use crate::glass::{self, GlassSlot};
+
 pub struct VelloScenePainter<'r, 's> {
     pub(crate) renderer: Option<&'r mut VelloRenderer>,
     pub(crate) device_handle: Option<&'r DeviceHandle>,
     pub(crate) texture_handles: Option<&'r mut FxHashMap<ResourceId, ImageData>>,
     pub(crate) inner: &'s mut vello::Scene,
+    pub(crate) glass: Option<&'r mut GlassSlot>,
 }
 
 impl RenderContext for VelloScenePainter<'_, '_> {
@@ -57,6 +61,45 @@ impl VelloScenePainter<'_, '_> {
             device_handle: None,
             texture_handles: None,
             inner: scene,
+            glass: None,
+        }
+    }
+
+    /// Pushes the marker of `group` and returns `true` if the frame should keep the group.
+    ///
+    /// Without a backend, it fills the tint instead and returns `false`, as it does for a
+    /// group with no shapes, which pushes nothing.
+    fn push_glass_marker(&mut self, group: &GlassGroup) -> bool {
+        let Some(slot) = self.glass.as_deref_mut() else {
+            fill_tint(self, group);
+            return false;
+        };
+        let Some(backend) = &slot.backend else {
+            fill_tint(self, group);
+            return false;
+        };
+        if group.shapes.is_empty() {
+            return false;
+        }
+        let regions = backend.regions(group, slot.inputs().scale);
+        let id = u32::try_from(slot.frame_groups.len()).expect("fewer than 2^32 glass groups");
+        let (marker, clamped) = glass::marker(id, regions);
+        if clamped && !slot.composite_outside_logged {
+            slot.composite_outside_logged = true;
+            log::warn!(
+                "glass.regions.composite_outside id={id} region={:?} composite={:?}",
+                regions.region,
+                regions.composite
+            );
+        }
+        self.inner.push_glass(marker);
+        true
+    }
+
+    /// Keeps `group` as the frame's next glass group.
+    fn keep_glass_group(&mut self, group: Arc<GlassGroup>) {
+        if let Some(slot) = self.glass.as_deref_mut() {
+            slot.frame_groups.push(group);
         }
     }
 }
@@ -64,6 +107,27 @@ impl VelloScenePainter<'_, '_> {
 impl PaintScene for VelloScenePainter<'_, '_> {
     fn reset(&mut self) {
         self.inner.reset();
+        if let Some(slot) = self.glass.as_deref_mut() {
+            slot.reset_frame();
+        }
+    }
+
+    fn draw_glass(&mut self, group: &GlassGroup) {
+        if self.push_glass_marker(group) {
+            self.keep_glass_group(Arc::new(group.clone()));
+        }
+    }
+
+    fn draw_shared_glass(&mut self, group: Arc<GlassGroup>) {
+        if self.push_glass_marker(&group) {
+            self.keep_glass_group(group);
+        }
+    }
+
+    fn supports_glass(&self) -> bool {
+        self.glass
+            .as_deref()
+            .is_some_and(|slot| slot.backend.is_some())
     }
 
     fn push_layer(

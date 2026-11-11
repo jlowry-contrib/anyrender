@@ -158,6 +158,12 @@ pub trait WindowRenderer: RenderContext {
     }
     fn set_size(&mut self, width: u32, height: u32);
     fn render<F: FnOnce(&mut Self::ScenePainter<'_>)>(&mut self, draw_fn: F);
+
+    /// Returns `true` when the renderer needs another frame even though nothing in the
+    /// scene changed, for example while glass animates. Defaults to `false`.
+    fn wants_redraw(&self) -> bool {
+        false
+    }
 }
 
 /// Abstraction for rendering a scene to an image buffer
@@ -276,6 +282,14 @@ pub trait PaintScene: RenderContext {
         glass::fill_tint(self, group);
     }
 
+    /// Draws a shared group of glass shapes, as [`draw_glass`](Self::draw_glass) does.
+    ///
+    /// [`append_scene`](Self::append_scene) replays recorded glass through this method, so
+    /// a backend that keeps the group can keep the `Arc` instead of cloning the group.
+    fn draw_shared_glass(&mut self, group: Arc<GlassGroup>) {
+        self.draw_glass(&group);
+    }
+
     /// Returns `true` when [`draw_glass`](Self::draw_glass) keeps glass rather than falling
     /// back to [`glass::fill_tint`].
     fn supports_glass(&self) -> bool {
@@ -353,7 +367,7 @@ pub trait PaintScene: RenderContext {
                 ),
                 RenderCommand::Glass(mut group) => {
                     Arc::make_mut(&mut group).apply_transform(scene_transform);
-                    self.draw_glass(&group);
+                    self.draw_shared_glass(group);
                 }
             }
         }

@@ -316,6 +316,10 @@ impl PaintScene for Scene {
             .push(RenderCommand::Glass(Arc::new(group.clone())));
     }
 
+    fn draw_shared_glass(&mut self, group: Arc<GlassGroup>) {
+        self.commands.push(RenderCommand::Glass(group));
+    }
+
     fn supports_glass(&self) -> bool {
         true
     }
