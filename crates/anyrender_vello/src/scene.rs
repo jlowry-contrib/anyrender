@@ -67,8 +67,9 @@ impl VelloScenePainter<'_, '_> {
 
     /// Pushes the marker of `group` and returns `true` if the frame should keep the group.
     ///
-    /// Without a backend, it fills the tint instead and returns `false`, as it does for a
-    /// group with no shapes, which pushes nothing.
+    /// Without a backend, it fills the tint instead and returns `false`. A group with no
+    /// shapes, or whose regions aren't finite or cover no pixels, pushes nothing and returns
+    /// `false`.
     fn push_glass_marker(&mut self, group: &GlassGroup) -> bool {
         let Some(slot) = self.glass.as_deref_mut() else {
             fill_tint(self, group);
@@ -83,12 +84,23 @@ impl VelloScenePainter<'_, '_> {
         }
         let regions = backend.regions(group, slot.inputs().scale);
         let id = u32::try_from(slot.frame_groups.len()).expect("fewer than 2^32 glass groups");
-        let (marker, clamped) = glass::marker(id, regions);
+        let Some((marker, clamped)) = glass::marker(id, regions) else {
+            if !slot.invalid_logged {
+                slot.invalid_logged = true;
+                log::warn!(
+                    "glass.regions.invalid region={:?} composite={:?}",
+                    regions.region,
+                    regions.composite
+                );
+            }
+            return false;
+        };
         if clamped && !slot.composite_outside_logged {
             slot.composite_outside_logged = true;
             log::warn!(
-                "glass.regions.composite_outside id={id} region={:?} composite={:?}",
-                regions.region,
+                "glass.regions.composite_outside id={id} region={:?} composite={:?} requested={:?}",
+                marker.region,
+                marker.composite,
                 regions.composite
             );
         }
@@ -246,5 +258,134 @@ impl PaintScene for VelloScenePainter<'_, '_> {
     ) {
         self.inner
             .draw_blurred_rounded_rect(transform, rect, brush, radius, std_dev);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use anyrender::PaintScene;
+    use anyrender::glass::{
+        CornerStyle, GlassGroup, GlassMaterial, GlassShape, GlassVariant, ShapeKind,
+    };
+    use kurbo::{Affine, Rect, RoundedRectRadii};
+    use vello::glass::{GlassFrame, GlassPasses, GlassPhase, IRect};
+    use wgpu::{CommandEncoder, Device, Queue};
+
+    use super::VelloScenePainter;
+    use crate::glass::{FrameInputs, GlassBackend, GlassRegions, GlassSlot};
+
+    /// The shape id for which [`Boxes`] returns a NaN region.
+    const INVALID: u32 = 99;
+
+    /// A backend whose composite is the group's box under each shape's transform, and whose
+    /// region is that box grown by 10.4 px, or NaN for a group whose first shape is
+    /// [`INVALID`].
+    struct Boxes;
+
+    impl GlassPasses for Boxes {
+        fn prepare(&mut self, _: &Device, _: &Queue, _: &GlassFrame<'_>) {}
+        fn record(&mut self, _: &Device, _: &mut CommandEncoder, _: &GlassPhase<'_>) {}
+    }
+
+    impl GlassBackend for Boxes {
+        fn regions(&self, group: &GlassGroup, scale: f64) -> GlassRegions {
+            let composite = group
+                .shapes
+                .iter()
+                .map(|shape| {
+                    let ShapeKind::RoundedRect { rect, .. } = &shape.kind else {
+                        unreachable!("the tests draw rounded rectangles only");
+                    };
+                    (Affine::scale(scale) * shape.transform).transform_rect_bbox(*rect)
+                })
+                .reduce(|a, b| a.union(b))
+                .unwrap();
+            let region = if group.shapes[0].id == INVALID {
+                Rect::new(f64::NAN, 0.0, 10.0, 10.0)
+            } else {
+                composite.inflate(10.4, 10.4)
+            };
+            GlassRegions { region, composite }
+        }
+
+        fn begin_frame(&mut self, _: &[Arc<GlassGroup>], _: &FrameInputs) {}
+    }
+
+    fn group(transform: Affine, rect: Rect) -> GlassGroup {
+        shape_group(0, transform, rect)
+    }
+
+    fn shape_group(id: u32, transform: Affine, rect: Rect) -> GlassGroup {
+        GlassGroup::new(vec![GlassShape::new(
+            id,
+            transform,
+            ShapeKind::RoundedRect {
+                rect,
+                radii: RoundedRectRadii::from_single_radius(1.0),
+                corner: CornerStyle::Circular,
+            },
+            GlassMaterial::new(GlassVariant::Regular),
+        )])
+    }
+
+    fn slot() -> GlassSlot {
+        GlassSlot {
+            backend: Some(Box::new(Boxes)),
+            ..GlassSlot::default()
+        }
+    }
+
+    fn painter<'r, 's>(
+        scene: &'s mut vello::Scene,
+        slot: &'r mut GlassSlot,
+    ) -> VelloScenePainter<'r, 's> {
+        VelloScenePainter {
+            renderer: None,
+            device_handle: None,
+            texture_handles: None,
+            inner: scene,
+            glass: Some(slot),
+        }
+    }
+
+    fn irect(x0: i32, y0: i32, x1: i32, y1: i32) -> IRect {
+        IRect { x0, y0, x1, y1 }
+    }
+
+    #[test]
+    fn draw_glass_under_a_fractional_transform_marks_the_shape_tiles() {
+        let (mut scene, mut slot) = (vello::Scene::new(), slot());
+        let transform = Affine::translate((0.5, 0.25)).then_scale(3.0);
+        let mut painter = painter(&mut scene, &mut slot);
+        painter.draw_glass(&group(transform, Rect::new(5.1, 5.0, 10.2, 10.0)));
+        // The shape's device box is (16.8, 15.75, 32.1, 30.75): composite (16, 15, 33, 31)
+        // and region (6, 5, 43, 42), which Vello snaps out to 16 px tiles.
+        let markers = &scene.encoding().glass.markers;
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].id, 0);
+        assert_eq!(markers[0].composite, irect(16, 0, 48, 32));
+        assert_eq!(markers[0].region, irect(0, 0, 48, 48));
+        assert_eq!(slot.frame_groups.len(), 1);
+        assert_eq!(slot.frame_groups[0].shapes[0].transform, transform);
+    }
+
+    #[test]
+    fn draw_glass_with_invalid_regions_marks_nothing_and_keeps_ids_dense() {
+        let (mut scene, mut slot) = (vello::Scene::new(), slot());
+        let rect = Rect::new(16.0, 16.0, 32.0, 32.0);
+        let mut painter = painter(&mut scene, &mut slot);
+        painter.draw_glass(&shape_group(INVALID, Affine::IDENTITY, rect));
+        painter.draw_glass(&group(Affine::IDENTITY, rect));
+        let markers = &scene.encoding().glass.markers;
+        assert_eq!(markers.len(), 1);
+        assert_eq!(
+            markers[0].id, 0,
+            "the valid group after an invalid one is marker 0"
+        );
+        assert_eq!(slot.frame_groups.len(), 1);
+        assert_eq!(slot.frame_groups[0].shapes[0].id, 0);
+        assert!(slot.invalid_logged);
     }
 }

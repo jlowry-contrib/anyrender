@@ -67,6 +67,8 @@ pub(crate) struct GlassSlot {
     pub(crate) frame_groups: Vec<Arc<GlassGroup>>,
     /// Whether this frame already logged a composite outside its region.
     pub(crate) composite_outside_logged: bool,
+    /// Whether this frame already logged regions it couldn't mark.
+    pub(crate) invalid_logged: bool,
 }
 
 impl GlassSlot {
@@ -79,6 +81,7 @@ impl GlassSlot {
     pub(crate) fn reset_frame(&mut self) {
         self.frame_groups.clear();
         self.composite_outside_logged = false;
+        self.invalid_logged = false;
     }
 
     /// Calls the backend's `begin_frame` if it is installed and `has_markers`, and returns
@@ -103,8 +106,18 @@ fn round_out(rect: Rect) -> IRect {
 
 /// Builds marker `id` from `regions`, rounded outward to whole pixels, with the composite
 /// clamped into the region. Returns the marker and whether the composite needed clamping.
-pub(crate) fn marker(id: u32, regions: GlassRegions) -> (GlassMarker, bool) {
+///
+/// Returns `None` when an edge of either rectangle isn't finite or the rounded region covers
+/// no pixels: a faulty backend's regions can't be marked.
+pub(crate) fn marker(id: u32, regions: GlassRegions) -> Option<(GlassMarker, bool)> {
+    let finite = |r: Rect| [r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite());
+    if !finite(regions.region) || !finite(regions.composite) {
+        return None;
+    }
     let region = round_out(regions.region);
+    if region.is_empty() {
+        return None;
+    }
     let composite = round_out(regions.composite);
     let clamped = IRect {
         x0: composite.x0.clamp(region.x0, region.x1),
@@ -117,7 +130,7 @@ pub(crate) fn marker(id: u32, regions: GlassRegions) -> (GlassMarker, bool) {
         region,
         composite: clamped,
     };
-    (marker, clamped != composite)
+    Some((marker, clamped != composite))
 }
 
 #[cfg(test)]
@@ -139,7 +152,7 @@ mod tests {
 
     #[test]
     fn draw_glass_rounds_fractional_rects_outward() {
-        let (marker, clamped) = marker(3, grown(Rect::new(10.3, 20.6, 50.2, 40.1)));
+        let (marker, clamped) = marker(3, grown(Rect::new(10.3, 20.6, 50.2, 40.1))).unwrap();
         assert_eq!(marker.id, 3);
         assert_eq!(marker.region, irect(-1, 10, 61, 51));
         assert_eq!(marker.composite, irect(10, 20, 51, 41));
@@ -152,7 +165,7 @@ mod tests {
             region: Rect::new(10.0, 10.0, 50.0, 50.0),
             composite: Rect::new(5.5, 20.0, 70.0, 40.0),
         };
-        let (marker, clamped) = marker(0, regions);
+        let (marker, clamped) = marker(0, regions).unwrap();
         assert!(clamped);
         assert_eq!(marker.region, irect(10, 10, 50, 50));
         assert_eq!(marker.composite, irect(10, 20, 50, 40));
@@ -164,7 +177,7 @@ mod tests {
             region: Rect::new(0.0, 0.0, 10.0, 10.0),
             composite: Rect::new(20.0, 0.0, 30.0, 10.0),
         };
-        let (marker, clamped) = marker(0, regions);
+        let (marker, clamped) = marker(0, regions).unwrap();
         assert!(clamped);
         assert!(marker.composite.is_empty());
     }
@@ -173,7 +186,7 @@ mod tests {
     fn draw_glass_under_a_fractional_transform_covers_the_shape() {
         let transform = Affine::translate((0.5, 0.25)).then_scale(3.0);
         let shape = transform.transform_rect_bbox(Rect::new(1.1, 2.3, 7.7, 9.9));
-        let (marker, _) = marker(0, grown(shape));
+        let (marker, _) = marker(0, grown(shape)).unwrap();
         let covers = |r: IRect, s: Rect| {
             f64::from(r.x0) <= s.x0
                 && f64::from(r.y0) <= s.y0
@@ -184,5 +197,43 @@ mod tests {
         assert!(covers(marker.region, shape.inflate(10.4, 10.4)));
         let (r, c) = (marker.region, marker.composite);
         assert!(r.x0 <= c.x0 && r.y0 <= c.y0 && c.x1 <= r.x1 && c.y1 <= r.y1);
+    }
+
+    fn region(x0: f64, y0: f64, x1: f64, y1: f64) -> GlassRegions {
+        GlassRegions {
+            region: Rect { x0, y0, x1, y1 },
+            composite: Rect::new(10.0, 10.0, 20.0, 20.0),
+        }
+    }
+
+    #[test]
+    fn an_inverted_region_is_not_marked() {
+        assert_eq!(marker(0, region(50.0, 0.0, 10.0, 40.0)), None);
+        assert_eq!(marker(0, region(0.0, 40.0, 40.0, 0.0)), None);
+    }
+
+    #[test]
+    fn a_region_with_a_nan_edge_is_not_marked() {
+        assert_eq!(marker(0, region(f64::NAN, 0.0, 40.0, 40.0)), None);
+        assert_eq!(marker(0, region(-20.0, 0.0, f64::NAN, 40.0)), None);
+        let nan_composite = GlassRegions {
+            composite: Rect::new(10.0, f64::NAN, 20.0, 20.0),
+            ..region(0.0, 0.0, 40.0, 40.0)
+        };
+        assert_eq!(marker(0, nan_composite), None);
+    }
+
+    #[test]
+    fn a_region_with_an_infinite_edge_is_not_marked() {
+        assert_eq!(marker(0, region(f64::INFINITY, 0.0, 40.0, 40.0)), None);
+        assert_eq!(marker(0, region(0.0, 0.0, f64::INFINITY, 40.0)), None);
+        assert_eq!(marker(0, region(f64::NEG_INFINITY, 0.0, 40.0, 40.0)), None);
+        assert_eq!(marker(0, region(0.0, f64::NEG_INFINITY, 40.0, 40.0)), None);
+    }
+
+    #[test]
+    fn a_region_past_the_i32_range_saturates_to_empty() {
+        // Both x edges saturate to i32::MAX, leaving no pixels.
+        assert_eq!(marker(0, region(1e12, 0.0, 2e12, 40.0)), None);
     }
 }
