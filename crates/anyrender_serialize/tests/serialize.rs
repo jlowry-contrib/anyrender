@@ -2,6 +2,7 @@
 
 use std::io::{Cursor, Read};
 
+use anyrender::glass::{GlassGroup, GlassMaterial, GlassShape, GlassVariant, ShapeKind};
 use anyrender::recording::{RenderCommand, Scene};
 use anyrender::{Glyph, Paint, PaintScene};
 use anyrender_serialize::{
@@ -381,6 +382,28 @@ fn test_archive_contains_expected_files() {
         .unwrap();
     let commands: Vec<SerializableRenderCommand> = serde_json::from_str(&commands_json).unwrap();
     assert_eq!(commands.len(), 1);
+}
+
+#[test]
+fn serialize_drops_glass_commands() {
+    let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+    let mut scene = Scene::new();
+    scene.fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &rect);
+    scene.draw_glass(&GlassGroup::new(vec![GlassShape::new(
+        1,
+        Affine::IDENTITY,
+        ShapeKind::Capsule(rect),
+        GlassMaterial::new(GlassVariant::Regular),
+    )]));
+    scene.pop_layer();
+
+    let archive = SceneArchive::from_scene(&scene, &default_config()).unwrap();
+    assert_eq!(archive.commands.len(), 2);
+    assert!(matches!(
+        archive.commands[0],
+        SerializableRenderCommand::Fill(_)
+    ));
+    assert_eq!(archive.commands[1], SerializableRenderCommand::PopLayer);
 }
 
 // Helpers

@@ -48,6 +48,8 @@ use std::{any::Any, sync::Arc};
 
 pub mod filters;
 pub use filters::Filter;
+pub mod glass;
+use glass::GlassGroup;
 pub mod wasm_send_sync;
 pub use wasm_send_sync::*;
 pub mod types;
@@ -266,6 +268,20 @@ pub trait PaintScene: RenderContext {
 
     // --- Provided methods
 
+    /// Draws a group of glass shapes over the content drawn so far.
+    ///
+    /// The default fills each shape with its tint (see [`glass::fill_tint`]), for backends
+    /// that can't render glass.
+    fn draw_glass(&mut self, group: &GlassGroup) {
+        glass::fill_tint(self, group);
+    }
+
+    /// Returns `true` when [`draw_glass`](Self::draw_glass) keeps glass rather than falling
+    /// back to [`glass::fill_tint`].
+    fn supports_glass(&self) -> bool {
+        false
+    }
+
     /// Append a recorded Scene Fragment to the current scene
     fn append_scene(&mut self, scene: Scene, scene_transform: Affine) {
         for cmd in scene.commands {
@@ -335,6 +351,10 @@ pub trait PaintScene: RenderContext {
                     cmd.radius,
                     cmd.std_dev,
                 ),
+                RenderCommand::Glass(mut group) => {
+                    Arc::make_mut(&mut group).apply_transform(scene_transform);
+                    self.draw_glass(&group);
+                }
             }
         }
     }

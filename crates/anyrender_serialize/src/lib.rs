@@ -233,6 +233,8 @@ impl ResourceCollector {
             RenderCommand::BoxShadow(shadow) => {
                 SerializableRenderCommand::BoxShadow(shadow.clone())
             }
+            // Glass needs a backend that renders it, so archives leave it out.
+            RenderCommand::Glass(_) => return None,
         })
     }
 }
@@ -320,6 +322,11 @@ impl ResourceReconstructor {
             }
             SerializableRenderCommand::BoxShadow(shadow) => {
                 RenderCommand::BoxShadow(shadow.clone())
+            }
+            SerializableRenderCommand::Glass(_) => {
+                return Err(ArchiveError::InvalidFormat(
+                    "glass commands are not part of the archive format".to_string(),
+                ));
             }
         })
     }

@@ -163,4 +163,6 @@ impl PaintScene for NullScenePainter {
         _std_dev: f64,
     ) {
     }
+
+    fn draw_glass(&mut self, _group: &crate::glass::GlassGroup) {}
 }

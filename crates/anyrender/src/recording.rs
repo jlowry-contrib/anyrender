@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::glass::GlassGroup;
 use crate::{Filter, Glyph, NormalizedCoord, Paint, PaintRef, PaintScene, RenderContext};
 use kurbo::{Affine, BezPath, Rect, Shape, Stroke};
 use peniko::{BlendMode, Color, Fill, FontData, Style, StyleRef};
@@ -30,6 +31,8 @@ pub enum RenderCommand<Font = FontData, Brush = Paint> {
     GlyphRun(GlyphRunCommand<Font, Brush>),
     /// Draw a rounded rectangle blurred with a gaussian filter.
     BoxShadow(BoxShadowCommand),
+    /// Draws a group of glass shapes over the content drawn so far.
+    Glass(Arc<GlassGroup>),
 }
 
 impl RenderCommand {
@@ -43,6 +46,7 @@ impl RenderCommand {
             RenderCommand::Fill(cmd) => cmd.transform = transform * cmd.transform,
             RenderCommand::GlyphRun(cmd) => cmd.transform = transform * cmd.transform,
             RenderCommand::BoxShadow(cmd) => cmd.transform = transform * cmd.transform,
+            RenderCommand::Glass(group) => Arc::make_mut(group).apply_transform(transform),
         };
 
         self
@@ -305,6 +309,15 @@ impl PaintScene for Scene {
             std_dev,
         };
         self.commands.push(RenderCommand::BoxShadow(box_shadow));
+    }
+
+    fn draw_glass(&mut self, group: &GlassGroup) {
+        self.commands
+            .push(RenderCommand::Glass(Arc::new(group.clone())));
+    }
+
+    fn supports_glass(&self) -> bool {
+        true
     }
 
     fn append_scene(&mut self, scene: Scene, scene_transform: Affine) {
