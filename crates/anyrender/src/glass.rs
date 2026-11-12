@@ -37,6 +37,11 @@ pub struct GlassGroup {
     pub alpha: f32,
     /// Where the group's backdrop comes from.
     pub source: BackdropSource,
+    /// A key that stays the same for this group across frames, if the caller has one.
+    ///
+    /// Backends that keep per-group state from frame to frame key it by this id; a group
+    /// without one starts afresh every frame.
+    pub id: Option<u64>,
 }
 
 impl GlassGroup {
@@ -48,7 +53,14 @@ impl GlassGroup {
             unions: Vec::new(),
             alpha: 1.0,
             source: BackdropSource::Behind,
+            id: None,
         }
+    }
+
+    /// Returns the group with the stable id `id`.
+    pub fn with_id(mut self, id: u64) -> Self {
+        self.id = Some(id);
+        self
     }
 
     /// Composes `transform` before every transform the group holds.
@@ -178,6 +190,39 @@ pub enum BackdropSource {
         /// The transform from the region's coordinates to the scene's.
         transform: Affine,
     },
+}
+
+/// A 4×5 colour matrix that a vibrant layer applies to its backdrop.
+///
+/// Row `i` maps the un-premultiplied backdrop `[r, g, b, a, 1]` to output channel `i` (red,
+/// green, blue, alpha). Each output is clamped to `clamp`, then to `[0, 1]`. See
+/// [`PaintScene::push_vibrant_layer`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct VibrantMatrix {
+    /// The output rows: four input weights and an offset each.
+    pub rows: [[f32; 5]; 4],
+    /// The lower and upper bound of every output channel, applied before `[0, 1]`.
+    pub clamp: (f32, f32),
+}
+
+impl VibrantMatrix {
+    /// The matrix that leaves the backdrop unchanged.
+    pub const IDENTITY: Self = Self {
+        rows: [
+            [1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0],
+        ],
+        clamp: (0.0, 1.0),
+    };
+}
+
+impl Default for VibrantMatrix {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
 }
 
 /// Fills each shape of `group` with its tint, under the shape's transform.

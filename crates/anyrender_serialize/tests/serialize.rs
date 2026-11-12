@@ -2,7 +2,9 @@
 
 use std::io::{Cursor, Read};
 
-use anyrender::glass::{GlassGroup, GlassMaterial, GlassShape, GlassVariant, ShapeKind};
+use anyrender::glass::{
+    GlassGroup, GlassMaterial, GlassShape, GlassVariant, ShapeKind, VibrantMatrix,
+};
 use anyrender::recording::{RenderCommand, Scene};
 use anyrender::{Glyph, Paint, PaintScene};
 use anyrender_serialize::{
@@ -404,6 +406,26 @@ fn serialize_drops_glass_commands() {
         SerializableRenderCommand::Fill(_)
     ));
     assert_eq!(archive.commands[1], SerializableRenderCommand::PopLayer);
+}
+
+#[test]
+fn serialize_writes_a_vibrant_layer_as_a_normal_layer() {
+    let clip = Rect::new(0.0, 0.0, 10.0, 10.0);
+    let transform = Affine::translate((2.0, 3.0));
+    let mut scene = Scene::new();
+    scene.push_vibrant_layer(&VibrantMatrix::IDENTITY, 0.5, transform, &clip);
+    scene.pop_layer();
+
+    let archive = SceneArchive::from_scene(&scene, &default_config()).unwrap();
+    let [
+        SerializableRenderCommand::PushLayer(layer),
+        SerializableRenderCommand::PopLayer,
+    ] = archive.commands.as_slice()
+    else {
+        panic!("expected a layer and its pop, got {:?}", archive.commands);
+    };
+    assert_eq!(layer.blend, Mix::Normal.into());
+    assert_eq!((layer.alpha, layer.transform), (0.5, transform));
 }
 
 // Helpers

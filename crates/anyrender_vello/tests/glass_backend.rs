@@ -2,9 +2,11 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyrender::glass::{GlassGroup, GlassMaterial, GlassShape, GlassVariant, ShapeKind};
+use anyrender::glass::{
+    GlassGroup, GlassMaterial, GlassShape, GlassVariant, ShapeKind, VibrantMatrix,
+};
 use anyrender::{ImageRenderer, PaintScene, WindowRenderer};
-use anyrender_vello::glass::{FrameInputs, GlassBackend, GlassRegions};
+use anyrender_vello::glass::{Accessibility, Appearance, FrameInputs, GlassBackend, GlassRegions};
 use anyrender_vello::{VelloImageRenderer, VelloScenePainter, VelloWindowRenderer};
 use kurbo::{Affine, Rect, RoundedRectRadii};
 use peniko::{Color, Fill};
@@ -23,6 +25,8 @@ struct Calls {
     begin_frames: usize,
     groups: Vec<Arc<GlassGroup>>,
     inputs: Vec<FrameInputs>,
+    /// The inputs each `regions` call received.
+    region_inputs: Vec<FrameInputs>,
     frames: Vec<(Vec<MarkerPlacement>, u32)>,
     records: Vec<u32>,
 }
@@ -125,8 +129,9 @@ impl GlassPasses for Fake {
 }
 
 impl GlassBackend for Fake {
-    fn regions(&self, group: &GlassGroup, scale: f64) -> GlassRegions {
-        let composite = group_box(group, scale);
+    fn regions(&self, group: &GlassGroup, inputs: &FrameInputs) -> GlassRegions {
+        self.calls.lock().unwrap().region_inputs.push(*inputs);
+        let composite = group_box(group, inputs.scale);
         let region = composite.inflate(GROW, GROW);
         let composite = if self.poke_out {
             Rect {
@@ -176,6 +181,11 @@ fn background(painter: &mut impl PaintScene) {
 
 /// Returns an image renderer, or `None` with a logged reason when there is no GPU adapter.
 fn image_renderer() -> Option<VelloImageRenderer> {
+    sized_image_renderer(SIZE)
+}
+
+/// Returns a `size`×`size` image renderer, or `None` when there is no GPU adapter.
+fn sized_image_renderer(size: u32) -> Option<VelloImageRenderer> {
     let context = wgpu_context::WGPUContext::new();
     let adapter = pollster::block_on(
         context
@@ -186,7 +196,7 @@ fn image_renderer() -> Option<VelloImageRenderer> {
         eprintln!("skipping: no GPU adapter ({error})");
         return None;
     }
-    Some(VelloImageRenderer::new(SIZE, SIZE))
+    Some(VelloImageRenderer::new(size, size))
 }
 
 fn render(
@@ -403,4 +413,107 @@ fn image_renderer_with_a_backend_composites_its_glass() {
             assert_eq!(pixel(&glass, x, y), expected, "pixel ({x}, {y})");
         }
     }
+}
+
+#[test]
+fn frame_inputs_default_to_light_without_accessibility() {
+    let inputs = FrameInputs::new(0.5, 3.0);
+    assert_eq!(inputs.time, 0.5);
+    assert_eq!(inputs.scale, 3.0);
+    assert_eq!(inputs.appearance, Appearance::Light);
+    assert_eq!(inputs.accessibility, Accessibility::new());
+    assert!(!inputs.accessibility.reduce_transparency);
+    assert!(!inputs.accessibility.increase_contrast);
+}
+
+#[test]
+fn frame_inputs_builders_set_appearance_and_accessibility() {
+    let mut accessibility = Accessibility::new();
+    accessibility.reduce_transparency = true;
+    let inputs = FrameInputs::new(0.0, 2.0)
+        .with_appearance(Appearance::Dark)
+        .with_accessibility(accessibility);
+    assert_eq!(inputs.appearance, Appearance::Dark);
+    assert!(inputs.accessibility.reduce_transparency);
+    assert!(!inputs.accessibility.increase_contrast);
+    assert_eq!(inputs.scale, 2.0);
+}
+
+#[test]
+fn regions_receive_the_frame_inputs() {
+    let Some(mut renderer) = image_renderer() else {
+        return;
+    };
+    let (fake, calls) = Fake::new();
+    renderer.set_glass_backend(Box::new(fake));
+    let mut accessibility = Accessibility::new();
+    accessibility.increase_contrast = true;
+    let inputs = FrameInputs::new(2.0, 2.0)
+        .with_appearance(Appearance::Dark)
+        .with_accessibility(accessibility);
+    renderer.set_glass_frame_inputs(inputs);
+    render(&mut renderer, |painter| {
+        painter.draw_glass(&rect_group(Rect::new(8.0, 8.0, 24.0, 24.0)));
+        painter.draw_glass(&rect_group(Rect::new(32.0, 32.0, 48.0, 48.0)));
+    });
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.region_inputs, vec![inputs, inputs]);
+    assert_eq!(calls.inputs, vec![inputs]);
+}
+
+#[test]
+fn vello_vibrant_layer_swaps_red_and_blue() {
+    const SIDE: u32 = 64;
+    let Some(mut renderer) = sized_image_renderer(SIDE) else {
+        return;
+    };
+    let swap = VibrantMatrix {
+        rows: [
+            [0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0],
+        ],
+        clamp: (0.0, 1.0),
+    };
+    let clip = Rect::new(16.0, 16.0, 48.0, 48.0);
+    let mut pixels = Vec::new();
+    renderer.render_to_vec(
+        |painter| {
+            let full = Rect::new(0.0, 0.0, f64::from(SIDE), f64::from(SIDE));
+            painter.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                Color::from_rgb8(255, 0, 0),
+                None,
+                &full,
+            );
+            painter.push_vibrant_layer(&swap, 1.0, Affine::IDENTITY, &clip);
+            painter.fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &full);
+            painter.pop_layer();
+        },
+        &mut pixels,
+    );
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let at = ((y * SIDE + x) * 4) as usize;
+            let got = &pixels[at..at + 4];
+            let inside = (16..48).contains(&x) && (16..48).contains(&y);
+            let expected: [u8; 4] = if inside {
+                [0, 0, 255, 255]
+            } else {
+                [255, 0, 0, 255]
+            };
+            let close = got.iter().zip(expected).all(|(&g, e)| g.abs_diff(e) <= 1);
+            assert!(close, "pixel ({x}, {y}) is {got:?}, expected {expected:?}");
+        }
+    }
+}
+
+#[test]
+fn image_renderer_reports_its_adapter() {
+    let Some(renderer) = image_renderer() else {
+        return;
+    };
+    assert!(!renderer.adapter_info().name.is_empty());
 }

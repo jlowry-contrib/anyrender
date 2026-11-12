@@ -14,8 +14,8 @@ use vello::glass::{GlassMarker, GlassPasses, IRect};
 /// The backend is a trait object (M-DI-HIERARCHY) because anyrender_vello can't name the
 /// types of the crate that renders the glass.
 pub trait GlassBackend: GlassPasses {
-    /// Returns the pixels `group` reads and writes, at a device scale of `scale`.
-    fn regions(&self, group: &GlassGroup, scale: f64) -> GlassRegions;
+    /// Returns the pixels `group` reads and writes under the frame's `inputs`.
+    fn regions(&self, group: &GlassGroup, inputs: &FrameInputs) -> GlassRegions;
 
     /// Sees the frame's groups, indexed by marker id, before Vello renders the frame.
     fn begin_frame(&mut self, groups: &[Arc<GlassGroup>], inputs: &FrameInputs);
@@ -43,20 +43,70 @@ pub struct FrameInputs {
     pub time: f64,
     /// Device pixels per scene unit.
     pub scale: f64,
+    /// The appearance the glass takes.
+    pub appearance: Appearance,
+    /// The accessibility settings the glass follows.
+    pub accessibility: Accessibility,
 }
 
 impl FrameInputs {
-    /// Creates frame inputs for time `time` at a device scale of `scale`.
-    pub fn new(time: f64, scale: f64) -> Self {
-        Self { time, scale }
+    /// Creates frame inputs for time `time` at a device scale of `scale`, in the light
+    /// appearance with no accessibility setting on.
+    pub const fn new(time: f64, scale: f64) -> Self {
+        Self {
+            time,
+            scale,
+            appearance: Appearance::Light,
+            accessibility: Accessibility::new(),
+        }
+    }
+
+    /// Returns the inputs with `appearance`.
+    pub fn with_appearance(mut self, appearance: Appearance) -> Self {
+        self.appearance = appearance;
+        self
+    }
+
+    /// Returns the inputs with `accessibility`.
+    pub fn with_accessibility(mut self, accessibility: Accessibility) -> Self {
+        self.accessibility = accessibility;
+        self
     }
 }
 
-/// The inputs a renderer uses until its caller sets some: time 0 at scale 1.
-const DEFAULT_INPUTS: FrameInputs = FrameInputs {
-    time: 0.0,
-    scale: 1.0,
-};
+/// Whether glass renders for a light or a dark interface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    /// The light appearance.
+    #[default]
+    Light,
+    /// The dark appearance.
+    Dark,
+}
+
+/// The accessibility settings that change how glass renders.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Accessibility {
+    /// Whether glass is drawn as a more opaque material.
+    pub reduce_transparency: bool,
+    /// Whether glass draws with stronger contrast.
+    pub increase_contrast: bool,
+}
+
+impl Accessibility {
+    /// Creates settings with every option off.
+    pub const fn new() -> Self {
+        Self {
+            reduce_transparency: false,
+            increase_contrast: false,
+        }
+    }
+}
+
+/// The inputs a renderer uses until its caller sets some: time 0 at scale 1, light, with no
+/// accessibility setting on.
+const DEFAULT_INPUTS: FrameInputs = FrameInputs::new(0.0, 1.0);
 
 /// A renderer's glass backend and the state of the frame being painted.
 #[derive(Default)]
@@ -290,7 +340,7 @@ mod tests {
     }
 
     impl GlassBackend for Inert {
-        fn regions(&self, _: &GlassGroup, _: f64) -> GlassRegions {
+        fn regions(&self, _: &GlassGroup, _: &FrameInputs) -> GlassRegions {
             grown(Rect::ZERO)
         }
 

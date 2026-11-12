@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use anyrender::glass::{
-    BackdropSource, GlassGroup, GlassMaterial, GlassShape, GlassVariant, ShapeKind,
+    BackdropSource, GlassGroup, GlassMaterial, GlassShape, GlassVariant, ShapeKind, VibrantMatrix,
 };
 use anyrender::recording::{RenderCommand, Scene};
 use anyrender::{Filter, Glyph, NormalizedCoord, Paint, PaintRef, PaintScene, RenderContext};
 use kurbo::{Affine, Rect, Shape, Stroke};
-use peniko::{BlendMode, Color, Fill, FontData, StyleRef};
+use peniko::{BlendMode, Color, Fill, FontData, Mix, StyleRef};
 
 /// A painter that keeps only its fills, and takes the default `draw_glass`.
 #[derive(Default)]
@@ -16,6 +16,8 @@ struct FillLog {
     fills: Vec<(Affine, Color)>,
     /// The address of each group `draw_shared_glass` received.
     shared: Vec<*const GlassGroup>,
+    /// The blend, alpha and transform of each pushed layer.
+    layers: Vec<(BlendMode, f32, Affine)>,
 }
 
 impl RenderContext for FillLog {}
@@ -28,13 +30,14 @@ impl PaintScene for FillLog {
     fn push_layer(
         &mut self,
         _fill: Fill,
-        _blend: impl Into<BlendMode>,
-        _alpha: f32,
-        _transform: Affine,
+        blend: impl Into<BlendMode>,
+        alpha: f32,
+        transform: Affine,
         _clip: &impl Shape,
         _filter: Option<Arc<Filter>>,
         _backdrop_filter: Option<Arc<Filter>>,
     ) {
+        self.layers.push((blend.into(), alpha, transform));
     }
 
     fn push_clip_layer(&mut self, _fill: Fill, _transform: Affine, _clip: &impl Shape) {}
@@ -300,4 +303,85 @@ fn recording_keeps_a_shared_group_without_cloning_it() {
         panic!("expected one glass command, got {:?}", scene.commands);
     };
     assert!(Arc::ptr_eq(kept, &group));
+}
+
+#[test]
+fn group_ids_survive_recording_and_replay() {
+    let group = two_shapes();
+    assert_eq!(group.id, None);
+    let group = group.with_id(42);
+    assert_eq!(group.id, Some(42));
+
+    let mut fragment = Scene::new();
+    fragment.draw_glass(&group);
+    let mut scene = Scene::new();
+    scene.append_scene(fragment, Affine::translate((3.0, 4.0)));
+    let [RenderCommand::Glass(replayed)] = scene.commands.as_slice() else {
+        panic!("expected one glass command, got {:?}", scene.commands);
+    };
+    assert_eq!(replayed.id, Some(42));
+}
+
+/// A matrix that swaps the red and blue channels.
+fn red_blue_swap() -> VibrantMatrix {
+    VibrantMatrix {
+        rows: [
+            [0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0],
+        ],
+        clamp: (0.0, 1.0),
+    }
+}
+
+#[test]
+fn push_vibrant_layer_records_and_replays_under_the_scene_transform() {
+    let clip = Rect::new(0.0, 0.0, 10.0, 10.0);
+    let local = Affine::translate((1.0, 2.0));
+    let offset = Affine::translate((10.0, 20.0));
+    let mut fragment = Scene::new();
+    fragment.push_vibrant_layer(&red_blue_swap(), 0.75, local, &clip);
+    fragment.pop_layer();
+
+    let mut scene = Scene::new();
+    scene.append_scene(fragment.clone(), offset);
+    let [
+        RenderCommand::PushVibrantLayer(layer),
+        RenderCommand::PopLayer,
+    ] = scene.commands.as_slice()
+    else {
+        panic!(
+            "expected a vibrant layer and a pop, got {:?}",
+            scene.commands
+        );
+    };
+    assert_eq!(layer.matrix, red_blue_swap());
+    assert_eq!(layer.alpha, 0.75);
+    assert_eq!(layer.transform, offset * local);
+    assert_eq!(layer.clip, clip.into_path(0.1));
+
+    // A painter without vibrant layers replays it as a normal layer, under the same transform.
+    let mut painter = FillLog::default();
+    painter.append_scene(fragment, offset);
+    assert_eq!(
+        painter.layers,
+        vec![(BlendMode::from(Mix::Normal), 0.75, offset * local)]
+    );
+}
+
+#[test]
+fn default_push_vibrant_layer_is_a_normal_layer() {
+    let mut painter = FillLog::default();
+    let transform = Affine::scale(2.0);
+    painter.push_vibrant_layer(
+        &red_blue_swap(),
+        0.5,
+        transform,
+        &Rect::new(0.0, 0.0, 4.0, 4.0),
+    );
+    assert_eq!(
+        painter.layers,
+        vec![(BlendMode::from(Mix::Normal), 0.5, transform)]
+    );
 }

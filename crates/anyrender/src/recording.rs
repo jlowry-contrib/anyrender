@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::glass::GlassGroup;
+use crate::glass::{GlassGroup, VibrantMatrix};
 use crate::{Filter, Glyph, NormalizedCoord, Paint, PaintRef, PaintScene, RenderContext};
 use kurbo::{Affine, BezPath, Rect, Shape, Stroke};
 use peniko::{BlendMode, Color, Fill, FontData, Style, StyleRef};
@@ -21,6 +21,9 @@ pub enum RenderCommand<Font = FontData, Brush = Paint> {
     /// Every drawing command after this call will be clipped by the shape until the layer is popped.
     /// However, the transforms are not saved or modified by the layer stack.
     PushClipLayer(ClipCommand),
+    /// Pushes a vibrant layer, which recolours its backdrop with a colour matrix.
+    /// It is popped by [`PopLayer`](Self::PopLayer).
+    PushVibrantLayer(VibrantLayerCommand),
     /// Pops the current layer.
     PopLayer,
     /// Strokes a shape using the specified style and brush.
@@ -41,6 +44,7 @@ impl RenderCommand {
         match &mut self {
             RenderCommand::PushLayer(cmd) => cmd.transform = transform * cmd.transform,
             RenderCommand::PushClipLayer(cmd) => cmd.transform = transform * cmd.transform,
+            RenderCommand::PushVibrantLayer(cmd) => cmd.transform = transform * cmd.transform,
             RenderCommand::PopLayer => {}
             RenderCommand::Stroke(cmd) => cmd.transform = transform * cmd.transform,
             RenderCommand::Fill(cmd) => cmd.transform = transform * cmd.transform,
@@ -81,6 +85,19 @@ pub struct ClipCommand {
     pub transform: Affine,
     #[cfg_attr(feature = "serde", serde(with = "svg_path"))]
     pub clip: BezPath, // TODO: more shape options
+}
+
+/// Pushes a vibrant layer, which recolours its backdrop with a colour matrix.
+///
+/// See [`PaintScene::push_vibrant_layer`].
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct VibrantLayerCommand {
+    pub matrix: VibrantMatrix,
+    pub alpha: f32,
+    pub transform: Affine,
+    #[cfg_attr(feature = "serde", serde(with = "svg_path"))]
+    pub clip: BezPath,
 }
 
 /// Strokes a shape using the specified style and brush.
@@ -216,6 +233,22 @@ impl PaintScene for Scene {
             clip,
         };
         self.commands.push(RenderCommand::PushClipLayer(layer));
+    }
+
+    fn push_vibrant_layer(
+        &mut self,
+        matrix: &VibrantMatrix,
+        alpha: f32,
+        transform: Affine,
+        clip: &impl Shape,
+    ) {
+        let layer = VibrantLayerCommand {
+            matrix: *matrix,
+            alpha,
+            transform,
+            clip: clip.into_path(self.tolerance),
+        };
+        self.commands.push(RenderCommand::PushVibrantLayer(layer));
     }
 
     fn pop_layer(&mut self) {

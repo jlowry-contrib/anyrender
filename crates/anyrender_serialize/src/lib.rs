@@ -14,13 +14,17 @@ use std::io::{Read, Seek, Write};
 
 use anyrender::Paint;
 use image::{ImageBuffer, ImageEncoder, RgbaImage};
-use peniko::{Blob, Color, FontData, Gradient, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
+use peniko::{
+    Blob, Color, Fill, FontData, Gradient, ImageAlphaType, ImageBrush, ImageData, ImageFormat, Mix,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
-use anyrender::recording::{FillCommand, GlyphRunCommand, RenderCommand, Scene, StrokeCommand};
+use anyrender::recording::{
+    FillCommand, GlyphRunCommand, LayerCommand, RenderCommand, Scene, StrokeCommand,
+};
 
 mod font_writer;
 mod json_formatter;
@@ -194,6 +198,20 @@ impl ResourceCollector {
             RenderCommand::PushClipLayer(clip) => {
                 SerializableRenderCommand::PushClipLayer(clip.clone())
             }
+            // The archive format has no vibrant layer, so it keeps the layer as the normal
+            // layer that `PaintScene::push_vibrant_layer` falls back to; dropping it would
+            // leave its `PopLayer` unmatched.
+            RenderCommand::PushVibrantLayer(layer) => {
+                SerializableRenderCommand::PushLayer(LayerCommand {
+                    fill: Fill::NonZero,
+                    blend: Mix::Normal.into(),
+                    alpha: layer.alpha,
+                    transform: layer.transform,
+                    clip: layer.clip.clone(),
+                    filter: None,
+                    backdrop_filter: None,
+                })
+            }
             RenderCommand::PopLayer => SerializableRenderCommand::PopLayer,
             RenderCommand::Stroke(stroke) => SerializableRenderCommand::Stroke(StrokeCommand {
                 style: stroke.style.clone(),
@@ -326,6 +344,11 @@ impl ResourceReconstructor {
             SerializableRenderCommand::Glass(_) => {
                 return Err(ArchiveError::InvalidFormat(
                     "glass commands are not part of the archive format".to_string(),
+                ));
+            }
+            SerializableRenderCommand::PushVibrantLayer(_) => {
+                return Err(ArchiveError::InvalidFormat(
+                    "vibrant layers are not part of the archive format".to_string(),
                 ));
             }
         })

@@ -49,7 +49,7 @@ use std::{any::Any, sync::Arc};
 pub mod filters;
 pub use filters::Filter;
 pub mod glass;
-use glass::GlassGroup;
+use glass::{GlassGroup, VibrantMatrix};
 pub mod wasm_send_sync;
 pub use wasm_send_sync::*;
 pub mod types;
@@ -296,6 +296,33 @@ pub trait PaintScene: RenderContext {
         false
     }
 
+    /// Pushes a vibrant layer clipped by `clip`, filled with the non-zero rule.
+    ///
+    /// The layer's content isn't drawn: its alpha, times `alpha` and the clip's coverage,
+    /// weights a mix of the backdrop towards `matrix` applied to the backdrop. The
+    /// `transform` applies only to `clip`, as for [`push_layer`](Self::push_layer). Pop it
+    /// with [`pop_layer`](Self::pop_layer).
+    ///
+    /// The default pushes a normal layer with `alpha`, for backends without vibrant layers.
+    fn push_vibrant_layer(
+        &mut self,
+        matrix: &VibrantMatrix,
+        alpha: f32,
+        transform: Affine,
+        clip: &impl Shape,
+    ) {
+        let _ = matrix;
+        self.push_layer(
+            Fill::NonZero,
+            peniko::Mix::Normal,
+            alpha,
+            transform,
+            clip,
+            None,
+            None,
+        );
+    }
+
     /// Append a recorded Scene Fragment to the current scene
     fn append_scene(&mut self, scene: Scene, scene_transform: Affine) {
         for cmd in scene.commands {
@@ -312,6 +339,12 @@ pub trait PaintScene: RenderContext {
                 RenderCommand::PushClipLayer(cmd) => {
                     self.push_clip_layer(cmd.fill, scene_transform * cmd.transform, &cmd.clip)
                 }
+                RenderCommand::PushVibrantLayer(cmd) => self.push_vibrant_layer(
+                    &cmd.matrix,
+                    cmd.alpha,
+                    scene_transform * cmd.transform,
+                    &cmd.clip,
+                ),
                 RenderCommand::PopLayer => self.pop_layer(),
                 RenderCommand::Stroke(cmd) => self.stroke(
                     &cmd.style,

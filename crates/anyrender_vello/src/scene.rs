@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyrender::glass::{GlassGroup, fill_tint};
+use anyrender::glass::{GlassGroup, VibrantMatrix, fill_tint};
 use anyrender::{Filter, NormalizedCoord, Paint, PaintRef, PaintScene, RenderContext, ResourceId};
 use kurbo::{Affine, Rect, Shape, Stroke};
 use peniko::{BlendMode, BrushRef, Color, Fill, FontData, ImageBrush, ImageData, StyleRef};
@@ -82,7 +82,7 @@ impl VelloScenePainter<'_, '_> {
         if group.shapes.is_empty() {
             return false;
         }
-        let regions = backend.regions(group, slot.inputs().scale);
+        let regions = backend.regions(group, &slot.inputs());
         let id = u32::try_from(slot.frame_groups.len()).expect("fewer than 2^32 glass groups");
         let Some((marker, clamped)) = glass::marker(id, regions) else {
             if !slot.invalid_logged {
@@ -157,6 +157,21 @@ impl PaintScene for VelloScenePainter<'_, '_> {
 
     fn push_clip_layer(&mut self, fill: Fill, transform: Affine, clip: &impl Shape) {
         self.inner.push_clip_layer(fill, transform, clip);
+    }
+
+    fn push_vibrant_layer(
+        &mut self,
+        matrix: &VibrantMatrix,
+        alpha: f32,
+        transform: Affine,
+        clip: &impl Shape,
+    ) {
+        let matrix = vello::VibrantMatrix {
+            rows: matrix.rows,
+            clamp: matrix.clamp,
+        };
+        self.inner
+            .push_vibrant_layer(matrix, alpha, transform, clip);
     }
 
     fn pop_layer(&mut self) {
@@ -290,7 +305,8 @@ mod tests {
     }
 
     impl GlassBackend for Boxes {
-        fn regions(&self, group: &GlassGroup, scale: f64) -> GlassRegions {
+        fn regions(&self, group: &GlassGroup, inputs: &FrameInputs) -> GlassRegions {
+            let scale = inputs.scale;
             let composite = group
                 .shapes
                 .iter()

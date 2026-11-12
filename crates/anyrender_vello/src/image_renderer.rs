@@ -68,6 +68,12 @@ impl VelloImageRenderer {
         self.glass.inputs = Some(inputs);
     }
 
+    /// Returns the adapter the renderer draws with, so a caller can check which GPU it got.
+    #[doc(hidden)]
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.buffer_renderer.device_handle.adapter.get_info()
+    }
+
     /// Returns the Vello renderer, for tests.
     #[doc(hidden)]
     pub fn vello_renderer(&self) -> Option<&VelloRenderer> {
