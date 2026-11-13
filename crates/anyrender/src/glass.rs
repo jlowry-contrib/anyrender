@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use kurbo::{Affine, BezPath, Ellipse, Rect, RoundedRect, RoundedRectRadii};
+use kurbo::{Affine, BezPath, Ellipse, Point, Rect, RoundedRect, RoundedRectRadii};
 use peniko::{Color, Fill};
 
 #[cfg(feature = "serde")]
@@ -91,17 +91,77 @@ pub struct GlassShape {
     pub kind: ShapeKind,
     /// How the shape bends and tints its backdrop.
     pub material: GlassMaterial,
+    /// How far the shape is pressed, from 0 (at rest) to 1 (fully pressed).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub press: f32,
+    /// Where the shape is touched, in the shape's own coordinates, if it is.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub touch: Option<Point>,
+    /// How far the shape has appeared, from 0 (the bare backdrop) to 1 (fully drawn).
+    ///
+    /// Backends take every glass effect towards the backdrop as this falls; it never fades the
+    /// shape by alpha.
+    #[cfg_attr(feature = "serde", serde(default = "fully_materialized"))]
+    pub materialize: f32,
+}
+
+/// The default [`GlassShape::materialize`]: a shape is fully drawn unless told otherwise.
+#[cfg(feature = "serde")]
+fn fully_materialized() -> f32 {
+    1.0
 }
 
 impl GlassShape {
-    /// Creates a glass shape.
+    /// Creates an unpressed, untouched, fully materialized glass shape.
     pub fn new(id: u32, transform: Affine, kind: ShapeKind, material: GlassMaterial) -> Self {
         Self {
             id,
             transform,
             kind,
             material,
+            press: 0.0,
+            touch: None,
+            materialize: 1.0,
         }
+    }
+
+    /// Returns the shape pressed by `press`, clamped to `[0, 1]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `press` is not finite.
+    pub fn with_press(mut self, press: f32) -> Self {
+        assert!(press.is_finite(), "glass press must be finite, got {press}");
+        self.press = press.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Returns the shape touched at `point`, in the shape's own coordinates.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either coordinate of `point` is not finite.
+    pub fn with_touch(mut self, point: Point) -> Self {
+        assert!(
+            point.is_finite(),
+            "glass touch must be finite, got {point:?}"
+        );
+        self.touch = Some(point);
+        self
+    }
+
+    /// Returns the shape materialized by `amount`, clamped to `[0, 1]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `amount` is not finite.
+    pub fn with_materialize(mut self, amount: f32) -> Self {
+        assert!(
+            amount.is_finite(),
+            "glass materialize must be finite, got {amount}"
+        );
+        self.materialize = amount.clamp(0.0, 1.0);
+        self
     }
 }
 

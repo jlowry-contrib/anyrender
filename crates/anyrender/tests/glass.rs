@@ -7,7 +7,7 @@ use anyrender::glass::{
 };
 use anyrender::recording::{RenderCommand, Scene};
 use anyrender::{Filter, Glyph, NormalizedCoord, Paint, PaintRef, PaintScene, RenderContext};
-use kurbo::{Affine, Rect, Shape, Stroke};
+use kurbo::{Affine, Point, Rect, Shape, Stroke};
 use peniko::{BlendMode, Color, Fill, FontData, Mix, StyleRef};
 
 /// A painter that keeps only its fills, and takes the default `draw_glass`.
@@ -384,4 +384,104 @@ fn default_push_vibrant_layer_is_a_normal_layer() {
         painter.layers,
         vec![(BlendMode::from(Mix::Normal), 0.5, transform)]
     );
+}
+
+fn plain_shape() -> GlassShape {
+    GlassShape::new(
+        1,
+        Affine::IDENTITY,
+        ShapeKind::Capsule(Rect::new(0.0, 0.0, 80.0, 30.0)),
+        GlassMaterial::new(GlassVariant::Regular),
+    )
+}
+
+#[test]
+fn new_shape_has_no_press_and_full_materialize() {
+    let shape = plain_shape();
+    assert_eq!(shape.press, 0.0);
+    assert_eq!(shape.touch, None);
+    assert_eq!(shape.materialize, 1.0);
+}
+
+#[test]
+fn builders_set_and_clamp() {
+    let shape = plain_shape()
+        .with_press(0.25)
+        .with_touch(Point::new(12.0, 7.0))
+        .with_materialize(0.5);
+    assert_eq!(shape.press, 0.25);
+    assert_eq!(shape.touch, Some(Point::new(12.0, 7.0)));
+    assert_eq!(shape.materialize, 0.5);
+
+    let clamped = plain_shape().with_press(1.5).with_materialize(-0.5);
+    assert_eq!(clamped.press, 1.0);
+    assert_eq!(clamped.materialize, 0.0);
+
+    let clamped = plain_shape().with_press(-2.0).with_materialize(3.0);
+    assert_eq!(clamped.press, 0.0);
+    assert_eq!(clamped.materialize, 1.0);
+}
+
+#[test]
+#[should_panic(expected = "glass press must be finite")]
+fn non_finite_press_panics() {
+    let _ = plain_shape().with_press(f32::NAN);
+}
+
+#[test]
+#[should_panic(expected = "glass materialize must be finite")]
+fn non_finite_materialize_panics() {
+    let _ = plain_shape().with_materialize(f32::INFINITY);
+}
+
+#[test]
+#[should_panic(expected = "glass touch must be finite")]
+fn non_finite_touch_panics() {
+    let _ = plain_shape().with_touch(Point::new(f64::NAN, 0.0));
+}
+
+#[test]
+fn motion_fields_survive_recording_and_replay() {
+    let touch = Point::new(12.0, 7.0);
+    let shape = plain_shape()
+        .with_press(0.75)
+        .with_touch(touch)
+        .with_materialize(0.4);
+    let mut fragment = Scene::new();
+    fragment.draw_glass(&GlassGroup::new(vec![shape]));
+    let mut scene = Scene::new();
+    scene.append_scene(fragment, Affine::translate((30.0, 40.0)));
+    let [RenderCommand::Glass(replayed)] = scene.commands.as_slice() else {
+        panic!("expected one glass command, got {:?}", scene.commands);
+    };
+    let replayed = &replayed.shapes[0];
+    assert_eq!(replayed.transform, Affine::translate((30.0, 40.0)));
+    assert_eq!(replayed.press, 0.75);
+    // The touch point is in the shape's own coordinates, so the scene transform leaves it.
+    assert_eq!(replayed.touch, Some(touch));
+    assert_eq!(replayed.materialize, 0.4);
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn motion_fields_round_trip_through_serde() {
+    let shape = plain_shape()
+        .with_press(0.75)
+        .with_touch(Point::new(12.0, 7.0))
+        .with_materialize(0.4);
+    let json = serde_json::to_string(&shape).expect("a glass shape serializes");
+    let back: GlassShape = serde_json::from_str(&json).expect("a glass shape deserializes");
+    assert_eq!(back, shape);
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn shapes_without_motion_fields_deserialize_at_rest() {
+    let mut json = serde_json::to_value(plain_shape()).expect("a glass shape serializes");
+    let fields = json.as_object_mut().expect("a glass shape is a map");
+    for name in ["press", "touch", "materialize"] {
+        fields.remove(name);
+    }
+    let back: GlassShape = serde_json::from_value(json).expect("a glass shape deserializes");
+    assert_eq!(back, plain_shape());
 }
