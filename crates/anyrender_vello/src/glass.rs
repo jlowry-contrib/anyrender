@@ -47,17 +47,20 @@ pub struct FrameInputs {
     pub appearance: Appearance,
     /// The accessibility settings the glass follows.
     pub accessibility: Accessibility,
+    /// When adaptive glass decides its look.
+    pub adapt_start: AdaptStart,
 }
 
 impl FrameInputs {
     /// Creates frame inputs for time `time` at a device scale of `scale`, in the light
-    /// appearance with no accessibility setting on.
+    /// appearance with no accessibility setting on, adapting live.
     pub const fn new(time: f64, scale: f64) -> Self {
         Self {
             time,
             scale,
             appearance: Appearance::Light,
             accessibility: Accessibility::new(),
+            adapt_start: AdaptStart::Live,
         }
     }
 
@@ -72,6 +75,26 @@ impl FrameInputs {
         self.accessibility = accessibility;
         self
     }
+
+    /// Returns the inputs with `adapt_start`.
+    pub fn with_adapt_start(mut self, adapt_start: AdaptStart) -> Self {
+        self.adapt_start = adapt_start;
+        self
+    }
+}
+
+/// When adaptive glass decides its look from its backdrop.
+///
+/// It has no default, so a caller that must choose a mode can't miss one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AdaptStart {
+    /// The glass adapts to its backdrop on every frame.
+    Live,
+    /// No glass adapts; each group takes the appearance's own look.
+    AppearanceOnly,
+    /// A group decides its look from its backdrop when it mounts, then holds it.
+    SettledAtMount,
 }
 
 /// Whether glass renders for a light or a dark interface.
@@ -105,7 +128,7 @@ impl Accessibility {
 }
 
 /// The inputs a renderer uses until its caller sets some: time 0 at scale 1, light, with no
-/// accessibility setting on.
+/// accessibility setting on, adapting live.
 const DEFAULT_INPUTS: FrameInputs = FrameInputs::new(0.0, 1.0);
 
 /// A renderer's glass backend and the state of the frame being painted.
@@ -233,6 +256,25 @@ mod tests {
         GlassRegions {
             region: shape.inflate(10.4, 10.4),
             composite: shape,
+        }
+    }
+
+    #[test]
+    fn frame_inputs_new_is_live() {
+        assert_eq!(FrameInputs::new(0.0, 1.0).adapt_start, AdaptStart::Live);
+    }
+
+    #[test]
+    fn with_adapt_start_sets_it() {
+        for mode in [
+            AdaptStart::Live,
+            AdaptStart::AppearanceOnly,
+            AdaptStart::SettledAtMount,
+        ] {
+            let inputs = FrameInputs::new(2.5, 3.0).with_adapt_start(mode);
+            assert_eq!(inputs.adapt_start, mode);
+            assert_eq!(inputs.time, 2.5);
+            assert_eq!(inputs.scale, 3.0);
         }
     }
 
